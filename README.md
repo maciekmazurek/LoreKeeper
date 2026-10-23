@@ -25,3 +25,7 @@ Twórcy rozbudowanych światów często toną w setkach notatek, co prowadzi do 
 * **Brak halucynacji:** Odpowiedzi są rygorystycznie uziemiane w faktach z Twoich notatek dzięki mechanizmowi RAG.
 
 ---
+
+### Architektura projektu
+
+![Architektura projektu](assets/architecture-pic.jpg)
