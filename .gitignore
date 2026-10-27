@@ -1,3 +1,6 @@
+# Ignore launchSettings.json file
+Properties/
+
 # Ignore .env file
 .env
 
