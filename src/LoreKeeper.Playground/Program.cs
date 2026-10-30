@@ -1,150 +1,84 @@
-﻿using Microsoft.SemanticKernel;
+﻿using LoreKeeper.Core.Interfaces;
+using LoreKeeper.Infrastructure;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
-using Microsoft.Extensions.AI;
-using Qdrant.Client;
-using Qdrant.Client.Grpc;
-using System.Security.Cryptography;
-using System.Text;
 
-var apiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
+var apiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY")
+    ?? throw new InvalidOperationException("Missing GEMINI_API_KEY environment variable.");
 
-if (string.IsNullOrWhiteSpace(apiKey))
-{
-    throw new InvalidOperationException(
-        "The GEMINI_API_KEY environment variable is missing. Set it in the current PowerShell session before running the application.");
-}
-
-// 1. Registration of Chat + Embedding in Semantic Kernel
-var builder = Kernel.CreateBuilder();
-
-builder.AddGoogleAIGeminiChatCompletion(
-    modelId: "gemini-3.6-flash",
-    apiKey: apiKey
-);
-
-builder.AddGoogleAIEmbeddingGenerator(
-    modelId: "gemini-embedding-001",
-    apiKey: apiKey,
-    dimensions: 768
-);
-
-var kernel = builder.Build();
-
-// 2. Chat request to Gemini
-var chatService = kernel.GetRequiredService<IChatCompletionService>();
-Console.WriteLine("Sending a chat request to Gemini...");
-var response = await chatService.GetChatMessageContentAsync("Wymyśl jednozdaniowy fakt o krasnoludach.");
-Console.WriteLine($"Gemini response: {response}\n");
-
-// 3. Connecting to Qdrant and creating a collection if it doesn't exist
-var qdrantClient = new QdrantClient("localhost", 6334);
-const string collectionName = "lore_test";
-const ulong vectorSize = 768; // Output dimension configured for gemini-embedding-001
-
-var collectionExists = await qdrantClient.CollectionExistsAsync(collectionName);
-if (!collectionExists)
-{
-    Console.WriteLine($"Creating collection '{collectionName}' in Qdrant...");
-    await qdrantClient.CreateCollectionAsync(
-        collectionName: collectionName,
-        vectorsConfig: new VectorParams
-        {
-            Size = vectorSize,
-            Distance = Distance.Cosine
-        }
-    );
-    Console.WriteLine("Collection created successfully.\n");
-}
-else
-{
-    Console.WriteLine($"Collection '{collectionName}' already exists.\n");
-}
-
-// 3. Generating an embedding for a text chunk and saving it to Qdrant
-var embeddingGenerator = kernel.GetRequiredService<
-    IEmbeddingGenerator<string, Embedding<float>>>();
-
-const string loreChunkText = "Krasnoludy z Klanu Żelaza nie znoszą magii i używają wyłącznie run.";
-
-Console.WriteLine($"Generating embedding for: \"{loreChunkText}\"...");
-
-var embeddings = await embeddingGenerator.GenerateAsync([loreChunkText]);
-var embedding = embeddings[0].Vector;
-
-Console.WriteLine($"Embedding generated! Vector size: {embedding.Length}");
-
-// Creating a point for Qdrant (ID, Vectors, Payload)
-var hash = MD5.HashData(Encoding.UTF8.GetBytes("manual_chunk_01.md"));
-var pointId = new Guid(hash);
-
-var point = new PointStruct
-{
-    Id = pointId,
-    Vectors = embedding.ToArray(),
-    Payload =
+var host = Host.CreateDefaultBuilder()
+    .ConfigureServices((_, services) =>
     {
-        ["text"] = loreChunkText,
-        ["source_file"] = "manual_chunk_01.md",
-        ["created_at"] = DateTime.UtcNow.ToString("o")
-    }
-};
+        // 1. Registration of the infrastructure (Qdrant, Embedding, LoreService)
+        services.AddLoreInfrastructure(options =>
+        {
+            options.GeminiApiKey = apiKey;
+            options.CollectionName = "lore_test";
+            options.VectorSize = 768;
+            options.QdrantHost = "localhost";
+            options.QdrantPort = 6334;
+        });
 
-Console.WriteLine("Writing point to Qdrant...");
-await qdrantClient.UpsertAsync(collectionName, new[] { point });
+        // 2. Registration of the LLM chat service (Gemini)
+        var kernelBuilder = Kernel.CreateBuilder();
+        kernelBuilder.AddGoogleAIGeminiChatCompletion(
+            modelId: "gemini-3.6-flash",
+            apiKey: apiKey
+        );
+        var kernel = kernelBuilder.Build();
+        services.AddSingleton(kernel.GetRequiredService<IChatCompletionService>());
+    })
+    .Build();
 
-Console.WriteLine($"Point of ID {pointId} has been successfully written to collection '{collectionName}'!");
+using var scope = host.Services.CreateScope();
+
+var vectorStore = scope.ServiceProvider.GetRequiredService<IVectorStore>();
+var loreService = scope.ServiceProvider.GetRequiredService<ILoreService>();
+var chatService = scope.ServiceProvider.GetRequiredService<IChatCompletionService>();
+
+// 1. Ensure Qdrant collection exists
+Console.WriteLine("--> Ensuring Qdrant collection exists...");
+await vectorStore.EnsureCollectionExistsAsync();
+
+// 2. Indexing lore (Writing to vector memory)
+Console.WriteLine("--> Indexing lore chunk...");
+await loreService.IndexChunkAsync(
+    text: "Krasnoludy z Klanu Żelaza nie znoszą magii i używają wyłącznie run.",
+    sourceFile: "dwarf_lore.md"
+);
 
 const string userQuery = "Czego używają krasnoludy zamiast czarów?";
-Console.WriteLine($"Query: \"{userQuery}\"");
+Console.WriteLine($"\n[User Query]: \"{userQuery}\"");
 
-Console.WriteLine("Generating embedding for the query...");
-var queryEmbeddings = await embeddingGenerator.GenerateAsync([userQuery]);
-var queryEmbedding = queryEmbeddings[0].Vector;
+// 3. RETRIEVAL (Searching for relevant lore in Qdrant)
+Console.WriteLine("--> Searching relevant facts in Qdrant...");
+var relevantChunks = await loreService.FindRelevantLoreAsync(userQuery, limit: 1);
+var topMatch = relevantChunks.FirstOrDefault();
 
-Console.WriteLine("Searching for the most similar point in Qdrant...");
-var searchResults = await qdrantClient.SearchAsync(
-    collectionName: collectionName,
-    vector: queryEmbedding.ToArray(),
-    limit: 1 // Fetch only the single closest match
-);
-
-var topMatch = searchResults.FirstOrDefault();
-
-if (topMatch != null)
+if (topMatch == null)
 {
-    Console.WriteLine($"\nMatch found! Score: {topMatch.Score:F4}");
-    
-    if (topMatch.Payload.TryGetValue("text", out var textValue))
-    {
-        Console.WriteLine($"Retrieved content: \"{textValue.StringValue}\"");
-    }
-
-    if (topMatch.Payload.TryGetValue("source_file", out var sourceValue))
-    {
-        Console.WriteLine($"Source file: {sourceValue.StringValue}");
-    }
-}
-else
-{
-    Console.WriteLine("No matches found.");
+    Console.WriteLine("No relevant lore found in the database.");
+    return;
 }
 
-// Retrieving the context from the top match or providing a default message if no match is found
-var retrievedContext = topMatch?.Payload["text"].StringValue ?? "Brak danych.";
+Console.WriteLine($"--> Retrieved from [{topMatch.SourceFile}] (Score: {topMatch.Score:F4}): \"{topMatch.Text}\"");
 
-// Building the prompt for the final grounded response
+// 5. AUGMENTED GENERATION (Using LLM to generate grounded answer)
 var prompt = $"""
     Jesteś Strażnikiem Wiedzy (LoreKeeper). 
     Odpowiedz na pytanie użytkownika WYŁĄCZNIE na podstawie poniższego kontekstu z dokumentacji.
-    Jeśli w kontekście nie ma odpowiedzi, napisz wprost: "Moje kroniki o tym milczą."
+    Jeśli kontekst nie pozwala na odpowiedź, napisz wprost: "Moje kroniki o tym milczą."
 
     [KONTEKST]:
-    {retrievedContext}
+    {topMatch.Text}
 
     [PYTANIE]:
     {userQuery}
     """;
 
-Console.WriteLine("\nGenerating final grounded response...");
-var finalAnswer = await chatService.GetChatMessageContentAsync(prompt);
-Console.WriteLine($"LoreKeeper's answer: {finalAnswer.Content}\n");
+Console.WriteLine("\n--> Generating grounded answer via LLM...");
+var response = await chatService.GetChatMessageContentAsync(prompt);
+
+Console.WriteLine($"\n[LoreKeeper Answer]: {response.Content}");
