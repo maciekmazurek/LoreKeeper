@@ -94,7 +94,7 @@ await qdrantClient.UpsertAsync(collectionName, new[] { point });
 
 Console.WriteLine($"Point of ID {pointId} has been successfully written to collection '{collectionName}'!");
 
-const string userQuery = "Czego używają kowale zamiast czarów?";
+const string userQuery = "Czego używają krasnoludy zamiast czarów?";
 Console.WriteLine($"Query: \"{userQuery}\"");
 
 Console.WriteLine("Generating embedding for the query...");
@@ -128,3 +128,23 @@ else
 {
     Console.WriteLine("No matches found.");
 }
+
+// Retrieving the context from the top match or providing a default message if no match is found
+var retrievedContext = topMatch?.Payload["text"].StringValue ?? "Brak danych.";
+
+// Building the prompt for the final grounded response
+var prompt = $"""
+    Jesteś Strażnikiem Wiedzy (LoreKeeper). 
+    Odpowiedz na pytanie użytkownika WYŁĄCZNIE na podstawie poniższego kontekstu z dokumentacji.
+    Jeśli w kontekście nie ma odpowiedzi, napisz wprost: "Moje kroniki o tym milczą."
+
+    [KONTEKST]:
+    {retrievedContext}
+
+    [PYTANIE]:
+    {userQuery}
+    """;
+
+Console.WriteLine("\nGenerating final grounded response...");
+var finalAnswer = await chatService.GetChatMessageContentAsync(prompt);
+Console.WriteLine($"LoreKeeper's answer: {finalAnswer.Content}\n");
