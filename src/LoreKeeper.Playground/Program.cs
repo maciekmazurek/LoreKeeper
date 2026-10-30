@@ -3,6 +3,8 @@ using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.Extensions.AI;
 using Qdrant.Client;
 using Qdrant.Client.Grpc;
+using System.Security.Cryptography;
+using System.Text;
 
 var apiKey = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
 
@@ -72,7 +74,8 @@ var embedding = embeddings[0].Vector;
 Console.WriteLine($"Embedding generated! Vector size: {embedding.Length}");
 
 // Creating a point for Qdrant (ID, Vectors, Payload)
-var pointId = Guid.NewGuid();
+var hash = MD5.HashData(Encoding.UTF8.GetBytes("manual_chunk_01.md"));
+var pointId = new Guid(hash);
 
 var point = new PointStruct
 {
@@ -90,3 +93,38 @@ Console.WriteLine("Writing point to Qdrant...");
 await qdrantClient.UpsertAsync(collectionName, new[] { point });
 
 Console.WriteLine($"Point of ID {pointId} has been successfully written to collection '{collectionName}'!");
+
+const string userQuery = "Czego używają kowale zamiast czarów?";
+Console.WriteLine($"Query: \"{userQuery}\"");
+
+Console.WriteLine("Generating embedding for the query...");
+var queryEmbeddings = await embeddingGenerator.GenerateAsync([userQuery]);
+var queryEmbedding = queryEmbeddings[0].Vector;
+
+Console.WriteLine("Searching for the most similar point in Qdrant...");
+var searchResults = await qdrantClient.SearchAsync(
+    collectionName: collectionName,
+    vector: queryEmbedding.ToArray(),
+    limit: 1 // Fetch only the single closest match
+);
+
+var topMatch = searchResults.FirstOrDefault();
+
+if (topMatch != null)
+{
+    Console.WriteLine($"\nMatch found! Score: {topMatch.Score:F4}");
+    
+    if (topMatch.Payload.TryGetValue("text", out var textValue))
+    {
+        Console.WriteLine($"Retrieved content: \"{textValue.StringValue}\"");
+    }
+
+    if (topMatch.Payload.TryGetValue("source_file", out var sourceValue))
+    {
+        Console.WriteLine($"Source file: {sourceValue.StringValue}");
+    }
+}
+else
+{
+    Console.WriteLine("No matches found.");
+}
