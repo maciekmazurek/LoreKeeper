@@ -1,5 +1,7 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/LoreKeeper.Core/LoreKeeper.Core.csproj" />
+    <Project Path="src/LoreKeeper.Infrastructure/LoreKeeper.Infrastructure.csproj" />
     <Project Path="src/LoreKeeper.Playground/LoreKeeper.Playground.csproj" />
   </Folder>
 </Solution>
